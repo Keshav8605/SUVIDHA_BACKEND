@@ -5,7 +5,7 @@ from typing import Optional, Dict, Any
 from .models import UserRole, UserRegistration, UserResponse, WorkerProfile
 from .database import (
     create_user, get_user_by_email, create_worker_profile, 
-    get_worker_by_email, get_department_by_id, create_department
+    get_worker_by_email, get_department_by_id, create_department, get_all_departments
 )
 from datetime import datetime
 import hashlib
@@ -43,16 +43,15 @@ class AuthService:
     async def register_user(self, user_data: UserRegistration) -> Dict[str, Any]:
         """Register a new user with role-based access"""
         try:
+            department = None
             # Validate worker-specific fields if role is worker
             if user_data.role == UserRole.WORKER:
                 if not user_data.employee_id or not user_data.department_id:
                     raise ValueError("Employee ID and Department ID are required for workers")
-                
                 # Verify department exists
                 department = await get_department_by_id(user_data.department_id)
                 if not department:
                     raise ValueError("Invalid department ID")
-            
             # Create Firebase user if available
             firebase_user = None
             if self.firebase_available:
@@ -88,7 +87,7 @@ class AuthService:
                     "phone": user_data.phone,
                     "employee_id": user_data.employee_id,
                     "department_id": user_data.department_id,
-                    "department_name": department.name,
+                    "department_name": department.name if department else None,
                     "skills": user_data.skills or [],
                     "profile_photo": user_data.profile_photo,
                     "is_active": True,
