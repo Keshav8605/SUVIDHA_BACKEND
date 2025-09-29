@@ -754,10 +754,261 @@ async def update_assignment_status_endpoint(ticket_id: str, status: str, notes: 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error updating assignment: {str(e)}")
 
+@app.post("/workers/register", response_model=UserResponse)
+async def register_worker(worker_data: dict):
+    """Register a new worker"""
+    try:
+        user_registration = UserRegistration(
+            email=worker_data["email"],
+            password=worker_data["password"],
+            name=worker_data["name"],
+            phone=worker_data.get("phone"),
+            role=UserRole.WORKER,
+            employee_id=worker_data.get("employee_id", f"EMP-{datetime.now().strftime('%Y%m%d')}-{str(uuid.uuid4())[:8]}"),
+            department_id=worker_data["department_id"],
+            skills=worker_data.get("skills", [])
+        )
+        
+        result = await auth_service.register_user(user_registration)
+        
+        if result["success"]:
+            return result
+        else:
+            raise HTTPException(status_code=400, detail=result["message"])
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Worker registration failed: {str(e)}")
+
+@app.post("/workers/login")
+async def worker_login(login_data: UserLogin):
+    """Worker login endpoint"""
+    try:
+        result = await auth_service.authenticate_user(login_data.email, login_data.password)
+        
+        if result["success"] and result["user"]["role"] == UserRole.WORKER.value:
+            return result
+        elif result["success"] and result["user"]["role"] != UserRole.WORKER.value:
+            raise HTTPException(status_code=403, detail="Access denied. Worker account required.")
+        else:
+            raise HTTPException(status_code=401, detail=result["message"])
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Worker login failed: {str(e)}")
+
+@app.get("/workers", response_model=List[WorkerProfile])
+async def get_all_workers_endpoint():
+    """Get all active workers"""
+    try:
+        workers = await get_all_workers()
+        return workers
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching workers: {str(e)}")
+
+@app.get("/workers/department/{department_id}", response_model=List[WorkerProfile])
+async def get_workers_by_department_endpoint(department_id: str):
+    """Get workers by department ID"""
+    try:
+        workers = await get_workers_by_department(department_id)
+        return workers
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching workers by department: {str(e)}")
+
+@app.get("/workers/profile/{email}", response_model=WorkerProfile)
+async def get_worker_profile_endpoint(email: str):
+    """Get worker profile by email"""
+    try:
+        worker = await get_worker_by_email(email)
+        if not worker:
+            raise HTTPException(status_code=404, detail="Worker not found")
+        return worker
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching worker profile: {str(e)}")
+
+# ============= ASSIGNMENT ROUTES =============
+
+@app.get("/assignments", response_model=List[IssueAssignment])
+async def get_all_assignments():
+    """Get all assignments"""
+    try:
+        from .database import get_all_assignments
+        all_assignments = await get_all_assignments()
+        return all_assignments
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching assignments: {str(e)}")
+
+@app.post("/assignments", response_model=AssignmentResponse)
+async def create_assignment_endpoint(assignment_request: AssignmentRequest, assigned_by_email: str = "admin@example.com"):
+    """Create a new assignment"""
+    try:
+        issues = await get_all_issues()
+        issue = next((i for i in issues if i.ticket_id == assignment_request.ticket_id), None)
+        if not issue:
+            raise HTTPException(status_code=404, detail="Issue not found")
+        
+        worker = await get_worker_by_email(assignment_request.assigned_to)
+        if not worker:
+            raise HTTPException(status_code=404, detail="Worker not found")
+        
+        existing_assignment = await get_assignment_by_ticket(assignment_request.ticket_id)
+        if existing_assignment:
+            raise HTTPException(status_code=400, detail="Issue is already assigned")
+        
+        assignment_data = {
+            "ticket_id": assignment_request.ticket_id,
+            "assigned_to": assignment_request.assigned_to,
+            "assigned_by": assigned_by_email,
+            "assigned_at": datetime.now().strftime("%H:%M %d-%m-%Y"),
+            "status": "assigned",
+            "notes": assignment_request.notes or ""
+        }
+        
+        assignment = await create_issue_assignment(assignment_data)
+        await update_issue_status_in_db(assignment_request.ticket_id, "in_progress", assigned_by_email)
+        
+        try:
+            current_workload = getattr(worker, 'current_workload', 0)
+            await update_worker_profile(assignment_request.assigned_to, {
+                "current_workload": current_workload + 1
+            })
+        except Exception as e:
+            print(f"Warning: Could not update worker workload: {e}")
+        
+        await email_service.send_assignment_notification(
+            assignment_request.ticket_id,
+            assignment_request.assigned_to,
+            assigned_by_email,
+            assignment_request.notes
+        )
+        
+        return AssignmentResponse(
+            message="Issue assigned successfully",
+            assignment_id=assignment.id if hasattr(assignment, 'id') else str(assignment._id),
+            ticket_id=assignment.ticket_id,
+            assigned_to=assignment.assigned_to,
+            assigned_by=assignment.assigned_by,
+            assigned_at=assignment.assigned_at,
+            status=assignment.status
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating assignment: {str(e)}")
+
+@app.get("/assignments/worker/{worker_email}", response_model=List[IssueAssignment])
+async def get_worker_assignments_endpoint(worker_email: str):
+    """Get all assignments for a specific worker"""
+    try:
+        assignments = await get_assignments_by_worker(worker_email)
+        return assignments
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching worker assignments: {str(e)}")
+
+@app.get("/issues/unassigned")
+async def get_unassigned_issues():
+    """Get issues that haven't been assigned to any worker"""
+    try:
+        all_issues = await get_all_issues()
+        
+        if assignments_collection is not None:
+            try:
+                assigned_tickets = set()
+                cursor = assignments_collection.find({}, {"ticket_id": 1})
+                async for assignment in cursor:
+                    assigned_tickets.add(assignment["ticket_id"])
+            except Exception as e:
+                print(f"Error querying assignments: {e}")
+                assigned_tickets = set()
+        else:
+            from .database import _in_memory_assignments
+            assigned_tickets = {assignment.get("ticket_id") for assignment in _in_memory_assignments}
+        
+        unassigned_issues = [
+            issue for issue in all_issues 
+            if issue.ticket_id not in assigned_tickets
+        ]
+        
+        return [
+            IssueResponse(
+                ticket_id=issue.ticket_id,
+                category=issue.category,
+                address=issue.address,
+                location=issue.location,
+                description=issue.description,
+                title=issue.title,
+                photo=issue.photo,
+                status=issue.status,
+                created_at=issue.created_at,
+                users=issue.users,
+                issue_count=issue.issue_count,
+                original_text=issue.original_text,
+                in_progress_at=issue.in_progress_at,
+                completed_at=issue.completed_at,
+                updated_by_email=getattr(issue, 'updated_by_email', None),
+                updated_at=getattr(issue, 'updated_at', None),
+                admin_completed_at=getattr(issue, 'admin_completed_at', None),
+                user_completed_at=getattr(issue, 'user_completed_at', None),
+                admin_completed_by=getattr(issue, 'admin_completed_by', None),
+                user_completed_by=getattr(issue, 'user_completed_by', None)
+            )
+            for issue in unassigned_issues
+        ]
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching unassigned issues: {str(e)}")
+
+
 # Initialize default departments on startup
 @app.on_event("startup")
 async def startup_event():
-    """
-    Initialize default departments on application startup
-    """
+    """Initialize default departments on application startup"""
     await auth_service.initialize_default_departments()
+    
+    # Initialize departments with categories
+    default_departments_with_categories = [
+        {
+            "name": "Electricity Department", 
+            "description": "Handles electrical issues and street lighting",
+            "categories": ["Electricity & Streetlights"],
+            "is_active": True,
+            "created_at": datetime.now().strftime("%H:%M %d-%m-%Y")
+        },
+        {
+            "name": "Water Supply Department",
+            "description": "Manages water supply and drainage systems", 
+            "categories": ["Water & Drainage"],
+            "is_active": True,
+            "created_at": datetime.now().strftime("%H:%M %d-%m-%Y")
+        },
+        {
+            "name": "Road Maintenance Department",
+            "description": "Manages road maintenance and transport infrastructure",
+            "categories": ["Roads & Transport"], 
+            "is_active": True,
+            "created_at": datetime.now().strftime("%H:%M %d-%m-%Y")
+        },
+        {
+            "name": "Sanitation Department",
+            "description": "Handles waste collection and sanitation issues",
+            "categories": ["Sanitation & Waste"],
+            "is_active": True, 
+            "created_at": datetime.now().strftime("%H:%M %d-%m-%Y")
+        }
+    ]
+    
+    # Create departments if they don't exist
+    try:
+        existing_depts = await get_all_departments()
+        existing_names = {dept.name for dept in existing_depts}
+        
+        from .database import create_department
+        for dept_data in default_departments_with_categories:
+            if dept_data["name"] not in existing_names:
+                await create_department(dept_data)
+                print(f"Created department: {dept_data['name']}")
+    except Exception as e:
+        print(f"Error initializing departments: {e}")

@@ -97,8 +97,9 @@ class Department(BaseModel):
     id: Optional[str] = Field(None, alias="_id")
     name: str = Field(..., description="Department name")
     description: Optional[str] = Field(None, description="Department description")
-    created_at: str = Field(default_factory=lambda: datetime.now().strftime("%H:%M %d-%m-%Y"))
+    categories: List[str] = Field(default_factory=list, description="Issue categories handled by this department")
     is_active: bool = Field(default=True, description="Whether department is active")
+    created_at: str = Field(default_factory=lambda: datetime.now().strftime("%H:%M %d-%m-%Y"))
 
     class Config:
         allow_population_by_field_name = True
@@ -118,6 +119,11 @@ class WorkerProfile(BaseModel):
     skills: List[str] = Field(default_factory=list, description="Worker's skills/specializations")
     profile_photo: Optional[str] = Field(None, description="Base64 encoded profile photo")
     is_active: bool = Field(default=True, description="Whether worker is active")
+    current_workload: int = Field(default=0, description="Current number of assigned tasks")
+    max_capacity: int = Field(default=5, description="Maximum tasks this worker can handle")
+    is_available: bool = Field(default=True, description="Whether worker is available for new assignments")
+    specialization: Optional[str] = Field(None, description="Worker's primary specialization")
+    experience_years: int = Field(default=0, description="Years of experience")
     created_at: str = Field(default_factory=lambda: datetime.now().strftime("%H:%M %d-%m-%Y"))
     updated_at: Optional[str] = Field(None, description="Last update timestamp")
 
