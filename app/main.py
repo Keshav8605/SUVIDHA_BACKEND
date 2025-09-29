@@ -754,28 +754,37 @@ async def update_assignment_status_endpoint(ticket_id: str, status: str, notes: 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error updating assignment: {str(e)}")
 
+# in main.py
+
 @app.post("/workers/register", response_model=UserResponse)
 async def register_worker(worker_data: dict):
     """Register a new worker"""
     try:
+        # Add a check for the required department_id field
+        if "department_id" not in worker_data:
+            raise HTTPException(status_code=422, detail="Missing required field: department_id")
+
         user_registration = UserRegistration(
             email=worker_data["email"],
             password=worker_data["password"],
             name=worker_data["name"],
             phone=worker_data.get("phone"),
             role=UserRole.WORKER,
-            employee_id=worker_data.get("employee_id", f"EMP-{datetime.now().strftime('%Y%m%d')}-{str(uuid.uuid4())[:8]}"),
             department_id=worker_data["department_id"],
             skills=worker_data.get("skills", [])
         )
-        
+
         result = await auth_service.register_user(user_registration)
-        
+
         if result["success"]:
             return result
         else:
-            raise HTTPException(status_code=400, detail=result["message"])
-    
+            # Be specific about the error
+            raise HTTPException(status_code=400, detail=result.get("message", "Registration failed."))
+
+    except KeyError as e:
+        # Catch errors from missing keys in the worker_data dict
+        raise HTTPException(status_code=422, detail=f"Missing required field in request: {e}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Worker registration failed: {str(e)}")
 
