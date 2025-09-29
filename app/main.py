@@ -7,7 +7,8 @@ from typing import List
 from .models import (
     IssueRequest, IssueResponse, IssueDB, StatusUpdateRequest, UserEmailRequest, 
     CompletionRequest, CompletionResponse, UserRegistration, UserLogin, UserResponse,
-    AssignmentRequest, AssignmentResponse, Department, WorkerProfile, IssueAssignment
+    AssignmentRequest, AssignmentResponse, Department, WorkerProfile, IssueAssignment,  
+    UserRole
 )
 from .database import (
     create_content_hash, 
