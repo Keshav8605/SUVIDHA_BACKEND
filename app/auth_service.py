@@ -47,7 +47,7 @@ class AuthService:
             # Validate worker-specific fields if role is worker
             if user_data.role == UserRole.WORKER:
                 if not user_data.employee_id or not user_data.department_id:
-                    raise ValueError("Employee ID and Department ID are required for workers")
+                    raise ValueError("V2 ERROR: Employee and Department IDs are required!")
                 # Verify department exists
                 department = await get_department_by_id(user_data.department_id)
                 if not department:

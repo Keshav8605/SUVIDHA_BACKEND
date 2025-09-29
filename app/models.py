@@ -3,6 +3,7 @@ from typing import Optional, List
 from datetime import datetime
 from bson import ObjectId
 from enum import Enum
+from pydantic import ConfigDict
 
 class Location(BaseModel):
     longitude: float
