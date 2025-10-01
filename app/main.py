@@ -664,75 +664,53 @@ async def get_worker_by_email_endpoint(email: str):
 
 # Issue assignment endpoints
 @app.post("/assignments", response_model=AssignmentResponse)
-async def assign_issue(assignment_request: AssignmentRequest, assigned_by: str):
-    """
-    Assign an issue to a worker
-    """
+async def create_assignment_endpoint(assignment_request: AssignmentRequest):
+    """Create a new assignment"""
     try:
-        # Verify the issue exists
-        issues = await get_all_issues()
-        issue = next((i for i in issues if i.ticket_id == assignment_request.ticket_id), None)
+        issue = next((i for i in await get_all_issues() if i.ticket_id == assignment_request.ticket_id), None)
         if not issue:
             raise HTTPException(status_code=404, detail="Issue not found")
         
-        # Verify the worker exists
         worker = await get_worker_by_email(assignment_request.assigned_to)
         if not worker:
             raise HTTPException(status_code=404, detail="Worker not found")
         
-        # Check if issue is already assigned
         existing_assignment = await get_assignment_by_ticket(assignment_request.ticket_id)
         if existing_assignment:
             raise HTTPException(status_code=400, detail="Issue is already assigned")
         
-        # Create assignment
         assignment_data = {
             "ticket_id": assignment_request.ticket_id,
             "assigned_to": assignment_request.assigned_to,
-            "assigned_by": assigned_by,
+            "assigned_by": assignment_request.assigned_by,
             "assigned_at": datetime.now().strftime("%H:%M %d-%m-%Y"),
             "status": "assigned",
-            "notes": assignment_request.notes
+            "notes": assignment_request.notes or ""
         }
         
         assignment = await create_issue_assignment(assignment_data)
+        await update_issue_status_in_db(assignment_request.ticket_id, "in_progress", assignment_request.assigned_by)
         
-        # Update issue status to in_progress
-        await update_issue_status_in_db(assignment_request.ticket_id, "in_progress", assigned_by)
-        
-        # Send notification email
-        await email_service.send_assignment_notification(
-            assignment_request.ticket_id,
-            assignment_request.assigned_to,
-            assigned_by,
-            assignment_request.notes
-        )
-        
+        # This returns a database model, we need to convert to the response model
         return AssignmentResponse(
             message="Issue assigned successfully",
-            assignment_id=assignment.id,
+            assignment_id=str(assignment.id),
             ticket_id=assignment.ticket_id,
             assigned_to=assignment.assigned_to,
             assigned_by=assignment.assigned_by,
             assigned_at=assignment.assigned_at,
             status=assignment.status
         )
-        
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error assigning issue: {str(e)}")
 
 @app.get("/assignments/worker/{worker_email}", response_model=List[IssueAssignment])
-async def get_worker_assignments(worker_email: str):
-    """
-    Get all assignments for a specific worker
-    """
-    try:
-        assignments = await get_assignments_by_worker(worker_email)
-        return assignments
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching assignments: {str(e)}")
+async def get_worker_assignments_endpoint(worker_email: str):
+    """Get all assignments for a specific worker"""
+    return await get_assignments_by_worker(worker_email)
+
 
 @app.put("/assignments/{ticket_id}/status")
 async def update_assignment_status_endpoint(ticket_id: str, status: str, notes: str = None):
