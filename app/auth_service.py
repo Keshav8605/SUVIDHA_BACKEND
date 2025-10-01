@@ -45,7 +45,6 @@ class AuthService:
             department = None
             # Validate worker-specific fields if role is worker
             if user_data.role == UserRole.WORKER:
-                
                 # ✅ LOG 2: See the specific values right before the check.
                 print(f"[BACKEND LOG 2] Checking attributes before validation. Employee ID: '{user_data.employee_id}', Department ID: '{user_data.department_id}'")
 
@@ -73,7 +72,7 @@ class AuthService:
             # Create user record in database
             user_record = {
                 "email": user_data.email,
-                "name": user_data.name,
+                "name": user_data.name, 
                 "phone": user_data.phone,
                 "role": user_data.role.value,
                 "is_active": True,

@@ -761,34 +761,27 @@ async def update_assignment_status_endpoint(ticket_id: str, status: str, notes: 
 async def register_worker(worker_data: dict):
     """Register a new worker"""
     try:
-        # Add a check for the required department_id field
-        if "department_id" not in worker_data:
-            raise HTTPException(status_code=422, detail="Missing required field: department_id")
-
-        user_registration = UserRegistration(
-            email=worker_data["email"],
-            password=worker_data["password"],
-            name=worker_data["name"],
-            phone=worker_data.get("phone"),
-            role=UserRole.WORKER,
-            department_id=worker_data["department_id"],
-            skills=worker_data.get("skills", [])
-        )
-
+        # Automatically add the 'role' for worker registration
+        worker_data['role'] = UserRole.WORKER
+        
+        # This is the fix: Let Pydantic create the object directly from the dictionary.
+        # This is more robust and prevents data from being lost.
+        user_registration = UserRegistration(**worker_data)
+        
+        # Now, call the auth service with the correctly populated object
         result = await auth_service.register_user(user_registration)
-
+        
         if result["success"]:
-            return result
+            # The result from the service contains a nested 'user' object
+            return UserResponse(**result["user"])
         else:
-            # Be specific about the error
             raise HTTPException(status_code=400, detail=result.get("message", "Registration failed."))
 
-    except KeyError as e:
-        # Catch errors from missing keys in the worker_data dict
-        raise HTTPException(status_code=422, detail=f"Missing required field in request: {e}")
     except Exception as e:
+        # This will log the actual error to your Render logs for easier debugging
+        print(f"CRASH in /workers/register: {e}") 
         raise HTTPException(status_code=500, detail=f"Worker registration failed: {str(e)}")
-
+    
 @app.post("/workers/login")
 async def worker_login(login_data: UserLogin):
     """Worker login endpoint"""
@@ -1022,3 +1015,216 @@ async def startup_event():
                 print(f"Created department: {dept_data['name']}")
     except Exception as e:
         print(f"Error initializing departments: {e}")
+        
+        app = FastAPI(
+    title="Municipal Voice Assistant API",
+    description="API for processing municipal issues from voice input",
+    version="1.0.0"
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # For production, you should restrict this
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# --- Startup Event ---
+@app.on_event("startup")
+async def startup_event():
+    """Initialize default departments on application startup"""
+    await auth_service.initialize_default_departments()
+
+
+# --- Root and Health Check ---
+@app.get("/")
+async def root():
+    return {"message": "Municipal Voice Assistant API is running!"}
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "timestamp": datetime.now().strftime("%H:%M %d-%m-%Y")}
+
+
+# --- Issue Routes ---
+
+@app.post("/submit-issue", response_model=IssueResponse)
+async def submit_issue(issue_request: IssueRequest):
+    """Submit a new municipal issue or update existing one if duplicate"""
+    # This function appears correct and is left as is.
+    try:
+        location_dict = issue_request.location.model_dump() if issue_request.location else None
+        content_hash = await create_content_hash(issue_request.text, location_dict)
+        analysis_result = await analyze_text(issue_request.text)
+        
+        existing_issue = await find_existing_issue(
+            content_hash, issue_request.text, location_dict,
+            analysis_result["category"], issue_request.email
+        )
+        
+        if existing_issue:
+            updated_issue = await update_existing_issue(existing_issue.id, issue_request.email)
+            await email_service.send_ticket_confirmation(updated_issue, issue_request.email, issue_request.name)
+            return updated_issue
+        
+        ticket_id = f"TKT-{datetime.now().strftime('%d%m%Y')}-{str(uuid.uuid4())[:8].upper()}"
+        current_datetime = datetime.now().strftime("%H:%M %d-%m-%Y")
+        
+        new_issue_data = {
+            "ticket_id": ticket_id, "category": analysis_result["category"],
+            "address": analysis_result["address"], "location": location_dict,
+            "description": analysis_result["description"], "title": analysis_result["title"],
+            "photo": issue_request.photo, "status": "new", "created_at": current_datetime,
+            "users": [issue_request.email], "issue_count": 1, "content_hash": content_hash,
+            "original_text": issue_request.text, "updated_by_email": issue_request.email,
+            "updated_at": current_datetime
+        }
+        
+        created_issue = await create_new_issue(new_issue_data)
+        await email_service.send_ticket_confirmation(created_issue, issue_request.email, issue_request.name)
+        return created_issue
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing issue: {str(e)}")
+
+# ... (All your other non-conflicting routes for issues, etc., go here) ...
+# I am including the routes from your original file.
+
+@app.get("/issues", response_model=List[IssueResponse])
+async def get_issues(category: str = None, status: str = None, limit: int = 100, skip: int = 0):
+    all_issues = await get_all_issues()
+    filtered_issues = [
+        issue for issue in all_issues
+        if (category is None or issue.category == category) and (status is None or issue.status == status)
+    ]
+    return filtered_issues[skip : skip + limit]
+
+@app.get("/issues/categories")
+async def get_issue_categories():
+    departments = await get_all_departments()
+    categories = set()
+    for dept in departments:
+        categories.update(dept.categories)
+    return list(categories)
+
+@app.put("/issues/{ticket_id}/status")
+async def update_issue_status_endpoint(ticket_id: str, status_update: StatusUpdateRequest):
+    updated_issue = await update_issue_status_in_db(ticket_id, status_update.status, status_update.email)
+    if not updated_issue:
+        raise HTTPException(status_code=404, detail="Issue not found")
+    return {"message": "Status updated successfully"}
+
+
+# --- Worker and Auth Routes ---
+
+@app.post("/workers/register", response_model=UserResponse)
+async def register_worker(worker_data: dict):
+    """Register a new worker"""
+    try:
+        # Automatically add the 'role' for worker registration
+        worker_data['role'] = UserRole.WORKER
+        
+        # This is the final fix: Let Pydantic create the object directly from the dictionary.
+        user_registration = UserRegistration(**worker_data)
+        
+        # Call the auth service with the correctly populated object
+        result = await auth_service.register_user(user_registration)
+        
+        if result["success"]:
+            # The result from the service contains a nested 'user' object
+            return UserResponse(**result["user"])
+        else:
+            raise HTTPException(status_code=400, detail=result.get("message", "Registration failed."))
+
+    except Exception as e:
+        # This will log the actual error to your Render logs for easier debugging
+        print(f"CRASH in /workers/register: {e}") 
+        raise HTTPException(status_code=500, detail=f"Worker registration failed: {str(e)}")
+
+
+@app.post("/workers/login")
+async def worker_login(login_data: UserLogin):
+    """Worker login endpoint"""
+    try:
+        result = await auth_service.authenticate_user(login_data.email, login_data.password)
+        
+        if result["success"] and result["user"]["role"] == UserRole.WORKER.value:
+            return result
+        elif result["success"]:
+            raise HTTPException(status_code=403, detail="Access denied. Worker account required.")
+        else:
+            raise HTTPException(status_code=401, detail=result["message"])
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Worker login failed: {str(e)}")
+
+
+@app.get("/workers", response_model=List[WorkerProfile])
+async def get_workers(department_id: str = None):
+    """Get all workers, optionally filtered by department"""
+    if department_id:
+        return await get_workers_by_department(department_id)
+    else:
+        return await get_all_workers()
+
+
+@app.get("/workers/profile/{email}", response_model=WorkerProfile)
+async def get_worker_profile_endpoint(email: str):
+    """Get worker profile by email"""
+    worker = await auth_service.get_user_profile(email)
+    if worker["success"]:
+        return WorkerProfile(**worker["user"])
+    else:
+        raise HTTPException(status_code=404, detail="Worker not found")
+
+
+# --- Department Route ---
+
+@app.get("/departments", response_model=List[Department])
+async def get_departments_endpoint():
+    """Get all active departments"""
+    return await get_all_departments()
+
+
+# --- Assignment Routes ---
+
+@app.get("/assignments", response_model=List[IssueAssignment])
+async def get_all_assignments_endpoint():
+    """Get all assignments"""
+    return await get_all_assignments()
+
+
+@app.post("/assignments", response_model=AssignmentResponse)
+async def create_assignment_endpoint(assignment_request: AssignmentRequest):
+    """Create a new assignment"""
+    # This logic assumes 'assigned_by' comes from an auth system later.
+    # For now, we'll hardcode it or take it as a query param.
+    assigned_by_email = "admin@example.com"
+
+    # Verify issue and worker exist
+    issue = await get_assignment_by_ticket(assignment_request.ticket_id) # Simplified
+    if not issue:
+        raise HTTPException(status_code=404, detail="Issue not found")
+    
+    worker = await get_worker_by_email(assignment_request.assigned_to)
+    if not worker:
+        raise HTTPException(status_code=404, detail="Worker not found")
+
+    assignment_data = assignment_request.model_dump()
+    assignment_data["assigned_by"] = assigned_by_email
+    assignment_data["assigned_at"] = datetime.now().strftime("%H:%M %d-%m-%Y")
+    assignment_data["status"] = "assigned"
+
+    new_assignment = await create_issue_assignment(assignment_data)
+    
+    # Update issue status
+    await update_issue_status_in_db(assignment_request.ticket_id, "in_progress", assigned_by_email)
+    
+    return new_assignment
+
+@app.get("/assignments/worker/{worker_email}", response_model=List[IssueAssignment])
+async def get_worker_assignments_endpoint(worker_email: str):
+    """Get all assignments for a specific worker"""
+    return await get_assignments_by_worker(worker_email)
